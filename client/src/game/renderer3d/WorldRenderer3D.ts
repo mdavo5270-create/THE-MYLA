@@ -1,29 +1,28 @@
 import * as THREE from 'three';
 import { World, WorldConfig } from '../map/world';
-import { TerrainMesh, TILE_SCALE } from './TerrainMesh';
-import { WaterMesh } from './WaterMesh';
-import { FoliageSystem } from './FoliageSystem';
+import { TileGrid } from '../grid/TileGrid';
+import { BuildingManager } from '../buildings/BuildingManager';
 import { SkyAtmosphere } from './SkyAtmosphere';
 import { Controls3D, CameraMode } from './Controls3D';
 
 export interface Diagnostics {
   fps: number;
-  worldX: number;
-  worldZ: number;
   tileX: number;
-  tileY: number;
-  biome: string;
+  tileZ: number;
+  terrainType: string;
   altitude: number;
-  activeChunks: number;
   timeOfDay: string;
-  drawCalls: number;
-  triangles: number;
+  isNight: boolean;
+  placedBuildingsCount: number;
+  buildMode: string;
 }
 
 /**
- * Master 3D Engine Orchestrator for THE MYLA.
- * Manages Three.js WebGLRenderer, PBR materials, real-time soft shadows,
- * dynamic terrain streaming, water dynamics, and atmospheric lighting.
+ * Moteur 3D principal de THE MYLA intégrant :
+ * - Grille de tuiles / carreaux isométriques 3D découpés
+ * - Système de construction et dépôt de bâtiments en temps réel
+ * - Vrai mode sombre nocturne sans blanchiment
+ * - Éclairage PBR avec ombres douces et illumination nocturne des lanternes/fenêtres
  */
 export class WorldRenderer3D {
   readonly world: World;
@@ -33,24 +32,30 @@ export class WorldRenderer3D {
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera;
 
-  private terrain: TerrainMesh;
-  private water: WaterMesh;
-  private foliage: FoliageSystem;
-  private sky: SkyAtmosphere;
+  readonly grid: TileGrid;
+  readonly buildingManager: BuildingManager;
+  readonly sky: SkyAtmosphere;
   private controls: Controls3D;
 
   private clock: THREE.Clock = new THREE.Clock();
   private frameCount: number = 0;
   private fps: number = 60;
   private lastFpsUpdate: number = 0;
-
   private isRunning: boolean = false;
+
+  // Raycasting pour la détection des carreaux sous le curseur
+  private raycaster = new THREE.Raycaster();
+  private mouse = new THREE.Vector2(-999, -999);
+  private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  private planeIntersectPoint = new THREE.Vector3();
+  private isPointerDragging: boolean = false;
+  private pointerDownPos = new THREE.Vector2();
 
   constructor(worldConfig: WorldConfig, container: HTMLElement) {
     this.world = new World(worldConfig);
     this.container = container;
 
-    // Initialize High-Performance WebGLRenderer with Soft Shadows and ACES Filmic Tone Mapping
+    // Configuration WebGLRenderer haute fidélité
     this.renderer = new THREE.WebGLRenderer({
       antialias: true,
       powerPreference: 'high-performance',
@@ -61,35 +66,75 @@ export class WorldRenderer3D {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.15;
+    this.renderer.toneMappingExposure = 1.05;
 
     this.container.innerHTML = '';
     this.container.appendChild(this.renderer.domElement);
 
-    // Scene & Camera
     this.scene = new THREE.Scene();
-    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1.0, 1600);
+    this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1.0, 1200);
 
-    // 3D Subsystems
+    // Initialisation du ciel et de l'atmosphère (vrai mode sombre)
     this.sky = new SkyAtmosphere(this.scene);
-    this.terrain = new TerrainMesh(this.world);
-    this.water = new WaterMesh(3000);
-    this.scene.add(this.water.mesh);
-    this.foliage = new FoliageSystem(this.world, this.terrain);
+
+    // Initialisation de la grille de tuiles (carreaux 3D nets)
+    this.grid = new TileGrid(this.world, 64, 64);
+    this.scene.add(this.grid.group);
+
+    // Initialisation du gestionnaire de bâtiments
+    this.buildingManager = new BuildingManager(this.scene, this.grid);
+
+    // Contrôleur de caméra isométrique
     this.controls = new Controls3D(this.camera, this.renderer.domElement);
+    this.controls.teleportTo(0, 5, 0);
 
-    // Initial spawn location (converted from tile coordinates to 3D world units)
-    const spawn = this.world.findSpawn();
-    const spawnX = spawn.x * TILE_SCALE;
-    const spawnZ = spawn.y * TILE_SCALE;
-    const spawnY = this.terrain.getHeightAt(spawnX, spawnZ);
-    this.controls.teleportTo(spawnX, spawnZ, spawnY);
+    // Écouteurs de souris pour le raycasting de tuiles
+    this.bindMouseRaycast();
 
-    // Window Resize Handler
+    // Raccourcis clavier (R pour pivoter, Échap pour annuler)
+    window.addEventListener('keydown', this.onKeyDown);
     window.addEventListener('resize', this.onResize);
 
+    // Démarrer la boucle de rendu
     this.start();
   }
+
+  private bindMouseRaycast(): void {
+    const el = this.renderer.domElement;
+
+    el.addEventListener('pointerdown', (e) => {
+      this.pointerDownPos.set(e.clientX, e.clientY);
+      this.isPointerDragging = false;
+    });
+
+    el.addEventListener('pointermove', (e) => {
+      const rect = el.getBoundingClientRect();
+      this.mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+      this.mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+
+      // Détection de glisser pour la caméra
+      if (Math.abs(e.clientX - this.pointerDownPos.x) > 5 || Math.abs(e.clientY - this.pointerDownPos.y) > 5) {
+        this.isPointerDragging = true;
+      }
+    });
+
+    el.addEventListener('pointerup', (e) => {
+      // Si clic sans glisser et clic gauche : poser / démolir le bâtiment
+      if (!this.isPointerDragging && e.button === 0 && this.buildingManager.mode !== 'none') {
+        this.buildingManager.handleClick();
+      }
+    });
+  }
+
+  private onKeyDown = (e: KeyboardEvent): void => {
+    if (e.code === 'KeyR') {
+      // Rotation à 90° du bâtiment
+      this.buildingManager.rotateCurrent();
+    } else if (e.code === 'Escape') {
+      // Annuler l'action de construction
+      this.buildingManager.cancelAction();
+    }
+  };
 
   private onResize = (): void => {
     const w = window.innerWidth;
@@ -117,7 +162,7 @@ export class WorldRenderer3D {
     const delta = Math.min(this.clock.getDelta(), 0.1);
     const elapsed = this.clock.getElapsedTime();
 
-    // FPS calculation
+    // Calcul du FPS
     this.frameCount++;
     if (elapsed - this.lastFpsUpdate >= 0.5) {
       this.fps = Math.round((this.frameCount / (elapsed - this.lastFpsUpdate)));
@@ -125,31 +170,35 @@ export class WorldRenderer3D {
       this.lastFpsUpdate = elapsed;
     }
 
-    // Update Camera Controls
-    this.controls.update(delta, (x, z) => this.terrain.getHeightAt(x, z));
+    // Raycast de la souris sur le plan de la grille
+    this.raycaster.setFromCamera(this.mouse, this.camera);
+    const hit = this.raycaster.ray.intersectPlane(this.groundPlane, this.planeIntersectPoint);
+
+    if (hit) {
+      const gridCoords = this.grid.worldToGrid(this.planeIntersectPoint.x, this.planeIntersectPoint.z);
+      if (gridCoords) {
+        this.buildingManager.updateHover(gridCoords.gridX, gridCoords.gridZ);
+      } else {
+        this.grid.hideCursor();
+      }
+    }
+
+    // Mise à jour de la caméra
+    this.controls.update(delta);
 
     const focusPos = this.controls.target;
 
-    // Update 3D Subsystems
+    // Mise à jour de l'atmosphère (Soleil/Lune)
     this.sky.update(focusPos, this.camera);
-    this.water.update(
-      delta,
-      this.camera,
-      this.sky.sunDirection,
-      this.sky.sunColor,
-      this.sky.fogColor,
-      this.sky.fogDensity
-    );
-    this.water.setPosition(focusPos.x, focusPos.z);
 
-    this.terrain.update(focusPos.x, focusPos.z, this.scene, 4);
-    this.foliage.update(focusPos.x, focusPos.z, this.scene, delta, 3);
+    // Mise à jour des bâtiments (animations et lumières de nuit)
+    this.buildingManager.update(delta, this.sky.isNight);
 
-    // Render 3D Scene
+    // Rendu de la scène
     this.renderer.render(this.scene, this.camera);
   };
 
-  // Controller APIs for HUD / UI
+  // APIs pour le menu et l'interface
   setTimeOfDay(hours: number): void {
     this.sky.setTimeOfDay(hours);
   }
@@ -158,35 +207,29 @@ export class WorldRenderer3D {
     return this.sky.timeOfDay;
   }
 
-  setWeather(weather: 'clear' | 'foggy' | 'rainy'): void {
-    this.sky.setWeather(weather);
-  }
-
-  getWeather(): string {
-    return this.sky.weather;
+  toggleNightMode(): void {
+    if (this.sky.isNight) {
+      this.sky.setTimeOfDay(14.0); // Retour au jour
+    } else {
+      this.sky.setTimeOfDay(0.0);  // Nuit sombre
+    }
   }
 
   setCameraMode(mode: CameraMode): void {
     this.controls.setMode(mode);
   }
 
-  getCameraMode(): CameraMode {
-    return this.controls.mode;
-  }
-
-  teleportToTile(tileX: number, tileY: number): void {
-    const wx = tileX * TILE_SCALE;
-    const wz = tileY * TILE_SCALE;
-    const wy = this.terrain.getHeightAt(wx, wz);
-    this.controls.teleportTo(wx, wz, wy);
+  teleportToTile(gridX: number, gridZ: number): void {
+    const pos = this.grid.gridToWorld(gridX, gridZ);
+    this.controls.teleportTo(pos.x, pos.y + 1, pos.z);
   }
 
   getDiagnostics(): Diagnostics {
     const focus = this.controls.target;
-    const tx = Math.floor(focus.x / TILE_SCALE);
-    const ty = Math.floor(focus.z / TILE_SCALE);
-    const biome = this.terrain.getBiomeAt(focus.x, focus.z);
-    const alt = this.terrain.getHeightAt(focus.x, focus.z);
+    const g = this.grid.worldToGrid(focus.x, focus.z);
+    const gx = g ? g.gridX : 0;
+    const gz = g ? g.gridZ : 0;
+    const tile = this.grid.getTile(gx, gz);
 
     const h = Math.floor(this.sky.timeOfDay);
     const m = Math.floor((this.sky.timeOfDay - h) * 60);
@@ -194,21 +237,20 @@ export class WorldRenderer3D {
 
     return {
       fps: this.fps,
-      worldX: Math.round(focus.x),
-      worldZ: Math.round(focus.z),
-      tileX: tx,
-      tileY: ty,
-      biome,
-      altitude: Math.round(alt * 10) / 10,
-      activeChunks: this.terrain.getActiveChunkCount(),
+      tileX: gx,
+      tileZ: gz,
+      terrainType: tile ? (tile.isWater ? 'Eau / Lac' : 'Terre / Prairie') : 'Extérieur',
+      altitude: tile ? tile.height : 0,
       timeOfDay: timeFormatted,
-      drawCalls: this.renderer.info.render.calls,
-      triangles: this.renderer.info.render.triangles,
+      isNight: this.sky.isNight,
+      placedBuildingsCount: this.buildingManager.getPlacedCount(),
+      buildMode: this.buildingManager.mode,
     };
   }
 
   destroy(): void {
     this.stop();
+    window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('resize', this.onResize);
     this.renderer.dispose();
   }

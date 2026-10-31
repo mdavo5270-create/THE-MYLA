@@ -1,31 +1,33 @@
 import { WorldRenderer3D } from '../renderer3d/WorldRenderer3D';
-import { TERRAIN_COLORS } from '../map/world';
-
-const MINI_W = 190;
-const MINI_H = 190;
+import { BuildingModels } from '../buildings/BuildingModels';
 
 /**
- * Modern glassmorphism HUD interface:
- * - Live telemetry (FPS, Biome, Coordinates, Altitude)
- * - Camera mode toggles (Isometric 3D, Free 3D, Top-Down)
- * - Real-time Day/Night lighting slider & quick presets
- * - Weather ambiance toggles (Clear, Fog, Rain)
- * - Interactive Minimap with real-time camera tracking and click-to-teleport
+ * Interface moderne Glassmorphism de THE MYLA :
+ * - Dock de construction de bâtiments (Maison, Tour, Moulin, Lanterne, Route, Fontaine, Ferme...)
+ * - Outil de démolition (Bulldozer)
+ * - Bouton de rotation 90° (Touche R)
+ * - Toggle instantané Mode Sombre / Nuit sombre sans blanchiment
+ * - Télémétrie en direct (FPS, tuile survolée, compteur de bâtiments)
  */
 export class HudOverlay {
   private readonly renderer3d: WorldRenderer3D;
   private readonly root: HTMLElement;
 
   private diagEl!: HTMLElement;
-  private miniCanvas!: HTMLCanvasElement;
-  private miniOverlayCanvas!: HTMLCanvasElement;
-  private timeSlider!: HTMLInputElement;
   private timeLabel!: HTMLElement;
+  private timeSlider!: HTMLInputElement;
+  private rotationBtn!: HTMLElement;
+  private buildingButtons: Map<string, HTMLButtonElement> = new Map();
+  private demolishBtn!: HTMLButtonElement;
 
   private updateTimer: number = 0;
 
   constructor(renderer3d: WorldRenderer3D) {
     this.renderer3d = renderer3d;
+
+    // Nettoyer l'ancien overlay s'il existe
+    const existing = document.getElementById('hud-root');
+    if (existing) existing.remove();
 
     this.root = document.createElement('div');
     this.root.id = 'hud-root';
@@ -43,9 +45,8 @@ export class HudOverlay {
 
     this.buildTopBar();
     this.buildControlsPanel();
-    this.buildMinimap();
+    this.buildBuildingDock();
 
-    // Start UI update loop
     this.loop();
   }
 
@@ -61,37 +62,35 @@ export class HudOverlay {
       pointer-events: auto;
     `;
 
-    // Title Card
     const card = document.createElement('div');
     card.style.cssText = `
-      background: rgba(15, 23, 42, 0.78);
+      background: rgba(15, 23, 42, 0.85);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 12px;
       padding: 12px 16px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
-      min-width: 280px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+      min-width: 270px;
     `;
 
     card.innerHTML = `
       <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
         <span style="font-weight: 800; font-size: 15px; letter-spacing: 0.5px; background: linear-gradient(135deg, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-          THE MYLA · 3D
+          THE MYLA · TUILES 3D
         </span>
         <span id="hud-fps-badge" style="background: rgba(34, 197, 94, 0.2); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.35); padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 700;">
           60 FPS
         </span>
       </div>
       <div id="hud-telemetry" style="font-size: 12px; color: #94a3b8; line-height: 1.6;">
-        Chargement de la télémétrie…
+        Initialisation de la grille…
       </div>
     `;
 
-    // Shortcuts pill
     const shortcuts = document.createElement('div');
     shortcuts.style.cssText = `
-      background: rgba(15, 23, 42, 0.65);
+      background: rgba(15, 23, 42, 0.7);
       backdrop-filter: blur(8px);
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-radius: 8px;
@@ -99,7 +98,7 @@ export class HudOverlay {
       font-size: 11px;
       color: #cbd5e1;
     `;
-    shortcuts.innerHTML = `🕹️ <b>ZQSD / Flèches</b> Déplacer · <b>Clic Droit</b> Orbiter · <b>Molette</b> Zoom · <b>Shift</b> Sprint`;
+    shortcuts.innerHTML = `💡 <b>Clic</b> Poser · <b>R</b> Tourner · <b>Échap</b> Annuler · <b>Molette</b> Zoom`;
 
     topBar.appendChild(card);
     topBar.appendChild(shortcuts);
@@ -114,69 +113,52 @@ export class HudOverlay {
       position: absolute;
       top: 16px;
       right: 16px;
-      background: rgba(15, 23, 42, 0.78);
+      background: rgba(15, 23, 42, 0.85);
       backdrop-filter: blur(12px);
       -webkit-backdrop-filter: blur(12px);
       border: 1px solid rgba(255, 255, 255, 0.12);
       border-radius: 12px;
       padding: 14px 16px;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
       display: flex;
       flex-direction: column;
       gap: 12px;
       pointer-events: auto;
-      width: 250px;
+      width: 240px;
     `;
 
-    // Camera Mode
-    const camSection = document.createElement('div');
-    camSection.innerHTML = `<div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Mode Caméra</div>`;
-    const camButtons = document.createElement('div');
-    camButtons.style.cssText = 'display: flex; gap: 4px;';
+    // Bouton bascule instantanée Mode Sombre / Mode Jour
+    const darkToggleBtn = document.createElement('button');
+    darkToggleBtn.style.cssText = `
+      width: 100%;
+      padding: 9px;
+      background: linear-gradient(135deg, #1e293b, #0f172a);
+      border: 1px solid rgba(56, 189, 248, 0.4);
+      color: #38bdf8;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      transition: all 0.2s ease;
+    `;
+    darkToggleBtn.innerHTML = `🌙 Basculer Nuit Sombre / Jour`;
+    darkToggleBtn.onclick = () => {
+      this.renderer3d.toggleNightMode();
+      this.timeSlider.value = this.renderer3d.getTimeOfDay().toString();
+    };
+    panel.appendChild(darkToggleBtn);
 
-    const modes: Array<{ id: 'isometric' | 'free' | 'topdown'; label: string; icon: string }> = [
-      { id: 'isometric', label: 'Iso 3D', icon: '📐' },
-      { id: 'free', label: 'Libre', icon: '🌐' },
-      { id: 'topdown', label: 'Zénith', icon: '🛰️' },
-    ];
-
-    const modeBtnEls: HTMLElement[] = [];
-    modes.forEach((m) => {
-      const btn = document.createElement('button');
-      btn.style.cssText = `
-        flex: 1;
-        padding: 6px 8px;
-        background: ${m.id === 'isometric' ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.05)'};
-        border: 1px solid ${m.id === 'isometric' ? 'rgba(56, 189, 248, 0.6)' : 'rgba(255, 255, 255, 0.1)'};
-        color: ${m.id === 'isometric' ? '#38bdf8' : '#e2e8f0'};
-        border-radius: 6px;
-        font-size: 11px;
-        font-weight: 600;
-        cursor: pointer;
-        transition: all 0.2s ease;
-      `;
-      btn.innerHTML = `${m.icon} ${m.label}`;
-      btn.onclick = () => {
-        this.renderer3d.setCameraMode(m.id);
-        modeBtnEls.forEach((b, idx) => {
-          const isCurr = modes[idx]?.id === m.id;
-          b.style.background = isCurr ? 'rgba(56, 189, 248, 0.25)' : 'rgba(255, 255, 255, 0.05)';
-          b.style.borderColor = isCurr ? 'rgba(56, 189, 248, 0.6)' : 'rgba(255, 255, 255, 0.1)';
-          b.style.color = isCurr ? '#38bdf8' : '#e2e8f0';
-        });
-      };
-      modeBtnEls.push(btn);
-      camButtons.appendChild(btn);
-    });
-    camSection.appendChild(camButtons);
-    panel.appendChild(camSection);
-
-    // Day/Night Cycle Slider & Presets
+    // Heure & Éclairage
     const timeSection = document.createElement('div');
     timeSection.innerHTML = `
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
-        <span style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Heure / Éclairage</span>
-        <span id="hud-time-val" style="font-size: 12px; font-weight: 700; color: #fbbf24;">15:30</span>
+        <span style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase;">Heure</span>
+        <span id="hud-time-val" style="font-size: 12px; font-weight: 700; color: #fbbf24;">14:30</span>
       </div>
     `;
 
@@ -184,7 +166,7 @@ export class HudOverlay {
     slider.type = 'range';
     slider.min = '0';
     slider.max = '24';
-    slider.step = '0.25';
+    slider.step = '0.5';
     slider.value = this.renderer3d.getTimeOfDay().toString();
     slider.style.cssText = 'width: 100%; cursor: pointer; accent-color: #38bdf8;';
     slider.oninput = () => {
@@ -192,168 +174,188 @@ export class HudOverlay {
     };
     this.timeSlider = slider;
     timeSection.appendChild(slider);
-
-    // Quick Time Presets
-    const presetsDiv = document.createElement('div');
-    presetsDiv.style.cssText = 'display: flex; gap: 4px; margin-top: 6px;';
-    const presets = [
-      { label: '🌅 Aube', time: 6.5 },
-      { label: '☀️ Midi', time: 12.0 },
-      { label: '🌇 Couché', time: 18.5 },
-      { label: '🌙 Nuit', time: 0.0 },
-    ];
-    presets.forEach((p) => {
-      const pbtn = document.createElement('button');
-      pbtn.style.cssText = `
-        flex: 1;
-        padding: 4px;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 4px;
-        color: #94a3b8;
-        font-size: 10px;
-        cursor: pointer;
-      `;
-      pbtn.innerText = p.label;
-      pbtn.onclick = () => {
-        this.renderer3d.setTimeOfDay(p.time);
-        this.timeSlider.value = p.time.toString();
-      };
-      presetsDiv.appendChild(pbtn);
-    });
-    timeSection.appendChild(presetsDiv);
     panel.appendChild(timeSection);
 
-    // Weather Section
-    const weatherSection = document.createElement('div');
-    weatherSection.innerHTML = `<div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Météo & Ambiance</div>`;
-    const weatherDiv = document.createElement('div');
-    weatherDiv.style.cssText = 'display: flex; gap: 4px;';
-    const weathers: Array<{ id: 'clear' | 'foggy' | 'rainy'; label: string }> = [
-      { id: 'clear', label: '☀️ Clair' },
-      { id: 'foggy', label: '🌫️ Brume' },
-      { id: 'rainy', label: '🌧️ Pluie' },
+    // Modes Caméra
+    const camSection = document.createElement('div');
+    camSection.innerHTML = `<div style="font-size: 11px; font-weight: 700; color: #94a3b8; text-transform: uppercase; margin-bottom: 6px;">Vue Caméra</div>`;
+    const camButtons = document.createElement('div');
+    camButtons.style.cssText = 'display: flex; gap: 4px;';
+
+    const modes = [
+      { id: 'isometric' as const, label: '📐 Iso' },
+      { id: 'free' as const, label: '🌐 Libre' },
+      { id: 'topdown' as const, label: '🛰️ Zénith' },
     ];
-    weathers.forEach((w) => {
-      const wbtn = document.createElement('button');
-      wbtn.style.cssText = `
+    modes.forEach((m) => {
+      const btn = document.createElement('button');
+      btn.style.cssText = `
         flex: 1;
-        padding: 5px;
+        padding: 6px;
         background: rgba(255, 255, 255, 0.05);
         border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 4px;
-        color: #cbd5e1;
-        font-size: 10px;
+        color: #e2e8f0;
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 600;
         cursor: pointer;
       `;
-      wbtn.innerText = w.label;
-      wbtn.onclick = () => {
-        this.renderer3d.setWeather(w.id);
-      };
-      weatherDiv.appendChild(wbtn);
+      btn.innerText = m.label;
+      btn.onclick = () => this.renderer3d.setCameraMode(m.id);
+      camButtons.appendChild(btn);
     });
-    weatherSection.appendChild(weatherDiv);
-    panel.appendChild(weatherSection);
+    camSection.appendChild(camButtons);
+    panel.appendChild(camSection);
 
     this.root.appendChild(panel);
     this.timeLabel = timeSection.querySelector('#hud-time-val')!;
   }
 
-  private buildMinimap(): void {
-    const box = document.createElement('div');
-    box.style.cssText = `
+  /**
+   * Dock de construction interactif fixé en bas de l'écran.
+   */
+  private buildBuildingDock(): void {
+    const dockContainer = document.createElement('div');
+    dockContainer.style.cssText = `
       position: absolute;
-      right: 16px;
-      bottom: 16px;
-      width: ${MINI_W}px;
-      height: ${MINI_H + 28}px;
-      background: rgba(15, 23, 42, 0.85);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 12px;
-      overflow: hidden;
-      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-      pointer-events: auto;
-      display: flex;
-      flex-direction: column;
-    `;
-
-    const header = document.createElement('div');
-    header.style.cssText = `
-      height: 28px;
-      background: rgba(0, 0, 0, 0.35);
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 0 10px;
-      font-size: 11px;
-      font-weight: 700;
-      color: #94a3b8;
+      gap: 10px;
+      pointer-events: auto;
+      background: rgba(15, 23, 42, 0.88);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 16px;
+      padding: 10px 14px;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+      max-width: 95vw;
+      overflow-x: auto;
     `;
-    header.innerHTML = `<span>🗺️ CARTE MONDE</span><span style="font-size: 9px; color: #64748b;">CLIC = TP</span>`;
-    box.appendChild(header);
 
-    const mapContainer = document.createElement('div');
-    mapContainer.style.cssText = `position: relative; width: ${MINI_W}px; height: ${MINI_H}px; cursor: crosshair;`;
+    const defs = BuildingModels.getAllDefinitions();
 
-    // Static terrain canvas
-    this.miniCanvas = document.createElement('canvas');
-    this.miniCanvas.width = MINI_W;
-    this.miniCanvas.height = MINI_H;
-    this.miniCanvas.style.cssText = 'position: absolute; inset: 0;';
+    defs.forEach((def) => {
+      const btn = document.createElement('button');
+      btn.style.cssText = `
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 4px;
+        padding: 8px 12px;
+        min-width: 64px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        border-radius: 10px;
+        color: #e2e8f0;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      `;
+      btn.innerHTML = `
+        <span style="font-size: 22px;">${def.icon}</span>
+        <span style="font-size: 10px; font-weight: 600; white-space: nowrap;">${def.name}</span>
+      `;
 
-    // Dynamic overlay canvas for player reticle
-    this.miniOverlayCanvas = document.createElement('canvas');
-    this.miniOverlayCanvas.width = MINI_W;
-    this.miniOverlayCanvas.height = MINI_H;
-    this.miniOverlayCanvas.style.cssText = 'position: absolute; inset: 0; pointer-events: none;';
+      btn.onclick = () => {
+        this.renderer3d.buildingManager.selectBuilding(def.id);
+        this.updateDockState();
+      };
 
-    mapContainer.appendChild(this.miniCanvas);
-    mapContainer.appendChild(this.miniOverlayCanvas);
+      this.buildingButtons.set(def.id, btn);
+      dockContainer.appendChild(btn);
+    });
 
-    // Click on Minimap to teleport 3D camera
-    const onMapClick = (e: MouseEvent) => {
-      const rect = mapContainer.getBoundingClientRect();
-      const u = Math.max(0, Math.min(1, (e.clientX - rect.left) / MINI_W));
-      const v = Math.max(0, Math.min(1, (e.clientY - rect.top) / MINI_H));
-      const targetTileX = Math.floor(u * this.renderer3d.world.width);
-      const targetTileY = Math.floor(v * this.renderer3d.world.height);
-      this.renderer3d.teleportToTile(targetTileX, targetTileY);
+    // Séparateur vertical
+    const sep = document.createElement('div');
+    sep.style.cssText = 'width: 1px; height: 36px; background: rgba(255, 255, 255, 0.15); margin: 0 4px;';
+    dockContainer.appendChild(sep);
+
+    // Bouton Rotation (R)
+    const rotBtn = document.createElement('button');
+    rotBtn.style.cssText = `
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 8px 12px;
+      min-width: 58px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 10px;
+      color: #38bdf8;
+      cursor: pointer;
+    `;
+    rotBtn.innerHTML = `
+      <span style="font-size: 20px;">🔄</span>
+      <span style="font-size: 10px; font-weight: 700;">Rot (R)</span>
+    `;
+    rotBtn.onclick = () => {
+      this.renderer3d.buildingManager.rotateCurrent();
+      this.updateDockState();
     };
+    this.rotationBtn = rotBtn;
+    dockContainer.appendChild(rotBtn);
 
-    mapContainer.addEventListener('click', onMapClick);
+    // Bouton Démolition (Bulldozer)
+    const demoBtn = document.createElement('button');
+    demoBtn.style.cssText = `
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 8px 12px;
+      min-width: 58px;
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      border-radius: 10px;
+      color: #f87171;
+      cursor: pointer;
+    `;
+    demoBtn.innerHTML = `
+      <span style="font-size: 20px;">💥</span>
+      <span style="font-size: 10px; font-weight: 700;">Démolir</span>
+    `;
+    demoBtn.onclick = () => {
+      this.renderer3d.buildingManager.selectDemolish();
+      this.updateDockState();
+    };
+    this.demolishBtn = demoBtn;
+    dockContainer.appendChild(demoBtn);
 
-    box.appendChild(mapContainer);
-    this.root.appendChild(box);
-
-    // Draw base minimap asynchronously
-    this.renderBaseMinimap();
+    this.root.appendChild(dockContainer);
   }
 
-  private renderBaseMinimap(): void {
-    const ctx = this.miniCanvas.getContext('2d');
-    if (!ctx) return;
+  private updateDockState(): void {
+    const bm = this.renderer3d.buildingManager;
 
-    const img = ctx.createImageData(MINI_W, MINI_H);
-    const w = this.renderer3d.world.width;
-    const h = this.renderer3d.world.height;
+    // Mise à jour de l'état des boutons de bâtiments
+    this.buildingButtons.forEach((btn, id) => {
+      const isSelected = bm.mode === 'place' && bm.selectedDefId === id;
+      btn.style.background = isSelected ? 'rgba(56, 189, 248, 0.3)' : 'rgba(255, 255, 255, 0.06)';
+      btn.style.borderColor = isSelected ? '#38bdf8' : 'rgba(255, 255, 255, 0.12)';
+      btn.style.color = isSelected ? '#38bdf8' : '#e2e8f0';
+      btn.style.transform = isSelected ? 'scale(1.08)' : 'scale(1)';
+    });
 
-    for (let v = 0; v < MINI_H; v++) {
-      for (let u = 0; u < MINI_W; u++) {
-        const tx = Math.floor((u / MINI_W) * w);
-        const ty = Math.floor((v / MINI_H) * h);
-        const tile = this.renderer3d.world.tile(tx, ty);
-        const col = TERRAIN_COLORS[tile.terrain] ?? 0x16365e;
-
-        const idx = (v * MINI_W + u) * 4;
-        img.data[idx] = (col >> 16) & 0xff;
-        img.data[idx + 1] = (col >> 8) & 0xff;
-        img.data[idx + 2] = col & 0xff;
-        img.data[idx + 3] = 255;
-      }
+    // État du bouton Démolir
+    if (this.demolishBtn) {
+      const isDemo = bm.mode === 'demolish';
+      this.demolishBtn.style.background = isDemo ? 'rgba(239, 68, 68, 0.4)' : 'rgba(239, 68, 68, 0.15)';
+      this.demolishBtn.style.borderColor = isDemo ? '#ef4444' : 'rgba(239, 68, 68, 0.35)';
+      this.demolishBtn.style.transform = isDemo ? 'scale(1.08)' : 'scale(1)';
     }
-    ctx.putImageData(img, 0, 0);
+
+    // Affichage de la rotation
+    if (this.rotationBtn) {
+      const deg = bm.currentRotation * 90;
+      this.rotationBtn.querySelector('span:last-child')!.textContent = `Rot ${deg}°`;
+    }
   }
 
   private loop = (): void => {
@@ -365,56 +367,37 @@ export class HudOverlay {
 
     const diag = this.renderer3d.getDiagnostics();
 
-    // Update Telemetry
+    // Mise à jour de la télémétrie
     if (this.diagEl) {
+      const modeText =
+        diag.buildMode === 'place' ? '🔨 Construction active' :
+        diag.buildMode === 'demolish' ? '💥 Outil Démolition' : '👀 Mode Inspection';
+
       this.diagEl.innerHTML = `
         <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-          <span>Biome :</span> <b style="color: #38bdf8;">${diag.biome}</b>
+          <span>Action :</span> <b style="color: #38bdf8;">${modeText}</b>
         </div>
         <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-          <span>Position :</span> <b>${diag.tileX}, ${diag.tileY}</b> (Alt: ${diag.altitude}m)
+          <span>Carreau :</span> <b>[${diag.tileX}, ${diag.tileZ}]</b> (${diag.terrainType})
         </div>
         <div style="display: flex; justify-content: space-between;">
-          <span>Chunks 3D :</span> <span>${diag.activeChunks} actifs (${Math.round(diag.triangles / 1000)}k tris)</span>
+          <span>Bâtiments posés :</span> <b style="color: #4ade80;">${diag.placedBuildingsCount}</b>
         </div>
       `;
     }
 
-    // Update FPS badge
+    // Badge FPS
     const badge = this.root.querySelector('#hud-fps-badge') as HTMLElement;
     if (badge) {
       badge.innerText = `${diag.fps} FPS`;
       badge.style.color = diag.fps >= 50 ? '#4ade80' : diag.fps >= 30 ? '#fbbf24' : '#f87171';
     }
 
-    // Update time label
+    // Heure
     if (this.timeLabel) {
-      this.timeLabel.innerText = diag.timeOfDay;
+      this.timeLabel.innerText = `${diag.timeOfDay} ${diag.isNight ? '🌙' : '☀️'}`;
     }
 
-    // Update Minimap reticle
-    const ctx = this.miniOverlayCanvas?.getContext('2d');
-    if (ctx) {
-      ctx.clearRect(0, 0, MINI_W, MINI_H);
-
-      const u = (diag.tileX / this.renderer3d.world.width) * MINI_W;
-      const v = (diag.tileY / this.renderer3d.world.height) * MINI_H;
-
-      // Pulse circle
-      ctx.beginPath();
-      ctx.arc(u, v, 5, 0, Math.PI * 2);
-      ctx.fillStyle = '#38bdf8';
-      ctx.fill();
-      ctx.lineWidth = 1.5;
-      ctx.strokeStyle = '#ffffff';
-      ctx.stroke();
-
-      // Crosshairs
-      ctx.strokeStyle = 'rgba(56, 189, 248, 0.4)';
-      ctx.beginPath();
-      ctx.moveTo(u, 0); ctx.lineTo(u, MINI_H);
-      ctx.moveTo(0, v); ctx.lineTo(MINI_W, v);
-      ctx.stroke();
-    }
+    this.updateDockState();
   };
 }

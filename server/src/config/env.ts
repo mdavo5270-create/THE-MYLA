@@ -17,6 +17,8 @@ const envSchema = z.object({
   SOCKET_PATH: z.string().default('/socket.io'),
   REDIS_URL: z.string().optional(),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  WORLD_SEED: z.string().default('the-myla'),
+  WORLD_SIZE: z.coerce.number().default(4096),
 });
 
 const parsed = envSchema.safeParse(process.env);
@@ -41,4 +43,6 @@ export const env = {
   SOCKET_PATH: process.env.SOCKET_PATH || '/socket.io',
   REDIS_URL: process.env.REDIS_URL,
   LOG_LEVEL: (process.env.LOG_LEVEL as 'debug' | 'info' | 'warn' | 'error') || 'info',
+  WORLD_SEED: process.env.WORLD_SEED || 'the-myla',
+  WORLD_SIZE: Number(process.env.WORLD_SIZE) || 4096,
 };

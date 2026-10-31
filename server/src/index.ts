@@ -14,6 +14,7 @@ import { logger } from './utils/logger.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { authRouter } from './auth/routes.js';
 import { healthRouter } from './routes/health.js';
+import { worldRouter } from './routes/world.js';
 import { setupSocket } from './multiplayer/socket.js';
 
 const app = express();
@@ -40,6 +41,7 @@ app.use(express.json({ limit: '100kb' }));
 // --- HTTP routes ---
 app.use('/health', healthRouter);
 app.use('/auth', authRouter);
+app.use('/world', worldRouter);
 
 // --- Socket.IO ---
 setupSocket(io);
